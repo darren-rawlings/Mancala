@@ -1,7 +1,7 @@
-using GameTemplate.Core;
+using Mancala.Core;
 using Xunit;
 
-namespace GameTemplate.Tests;
+namespace Mancala.Tests;
 
 public class ScoreboardTests
 {
