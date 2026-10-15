@@ -28,12 +28,12 @@ Counter Fire's lesson: real-feeling pieces, honest sounds, one unforgettable eff
   (Style menu, shared with Counter Fire: Classic, Oak, Steel, Glass, Marble for the board; Red,
   Walnut, Silver, Sapphire, Ivory for the marbles). Each material has its own sound.
 - **Sowing** is visible: the stones lift out of the pit together, then drop one at a time into
-  each pit along the way, each landing with a glassy **clink** (the glass sound we tuned for
-  phone speakers).
+  each pit along the way, each landing with the sound of its material (marble on marble, or on
+  the board).
 - **Signature effect, the capture**: sparks burst from the pit, then the captured marbles flare with
   light and stream into your store in glowing arcs ("Capture! +5"). Landing in
   your own store for an extra turn makes the store pulse.
-- **Counts** float above each pit and store, so nobody has to count gems by eye.
+- **Counts** float above each pit and store, so nobody has to count marbles by eye.
 
 ## Modes
 
