@@ -1,7 +1,6 @@
 # Mancala: design
 
-Working store title: **Pit Stop: Mancala**. Package `com.renegadegames.mancala` (neutral, so the
-title can change before release without touching it).
+Store title: **Mancala**. Package `com.renegadegames.mancala`.
 
 ## The game
 
@@ -22,13 +21,17 @@ The classic two-row count-and-capture game (the "Kalah" rules most people know):
 
 Counter Fire's lesson: real-feeling pieces, honest sounds, one unforgettable effect.
 
-- A carved **wooden board** with deep round pits. The stones are **glass gems** in mixed colours
-  (the traditional look), real physics bodies that tumble and settle into little piles.
+- The board lies **horizontally**, the traditional way round (your row nearest you, your store
+  on your right); **drag sideways to spin it**, as in Counter Fire. Deep round pits; the stores are
+  big rounded rectangles running across the board.
+- The stones are **marbles**: perfect spheres, all one colour, set by the material you choose
+  (Style menu, shared with Counter Fire: Classic, Oak, Steel, Glass, Marble for the board; Red,
+  Walnut, Silver, Sapphire, Ivory for the marbles). Each material has its own sound.
 - **Sowing** is visible: the stones lift out of the pit together, then drop one at a time into
   each pit along the way, each landing with a glassy **clink** (the glass sound we tuned for
   phone speakers).
-- **Signature effect, "the pit stop"**: on a capture, the captured gems flare with light and
-  stream into your store in a glowing arc, like a pit crew grabbing everything at once. Landing in
+- **Signature effect, the capture**: sparks burst from the pit, then the captured marbles flare with
+  light and stream into your store in glowing arcs ("Capture! +5"). Landing in
   your own store for an extra turn makes the store pulse.
 - **Counts** float above each pit and store, so nobody has to count gems by eye.
 
@@ -47,11 +50,10 @@ Same as Counter Fire, from renegade-core:
 ## Scope for version 1
 
 - Kalah rules, 4 stones per pit; PvP and PvC with three levels; undo vs computer.
-- Glass gems on a wooden board; sowing, capture and extra-turn effects; counts; sounds.
+- Five board and marble materials; sowing, capture and extra-turn effects; counts; sounds; spin.
 - Settings: sound on/off, mode, difficulty.
 
 ## Later
 
-- Board and gem styles (stone, shell, marble), as Counter Fire has.
 - Rule options: 3/5/6 stones per pit; the "empty capture" variant.
 - Other mancala families (Oware, Bao).

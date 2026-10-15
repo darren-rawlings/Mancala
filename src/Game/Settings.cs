@@ -13,6 +13,8 @@ public sealed class Settings
 	public bool Muted { get; set; }
 	public GameMode Mode { get; set; } = GameMode.PlayerVsComputer;
 	public Difficulty Difficulty { get; set; } = Difficulty.Easy;
+	public Style Board { get; set; } = Style.Wood;
+	public Style Beads { get; set; } = Style.Glass;
 
 	/// <summary>Finished games since the last between-games ad; see <see cref="Renegade.Core.AdSchedule"/>.</summary>
 	public int GamesSinceAd { get; set; }
@@ -26,6 +28,8 @@ public sealed class Settings
 		settings.Muted = file.GetValue(Section, "muted", false).AsBool();
 		settings.Mode = ReadEnum(file, "mode", settings.Mode);
 		settings.Difficulty = ReadEnum(file, "difficulty", settings.Difficulty);
+		settings.Board = ReadStyle(file, "board", settings.Board);
+		settings.Beads = ReadStyle(file, "beads", settings.Beads);
 		settings.GamesSinceAd = file.GetValue(Section, "games_since_ad", 0).AsInt32();
 		return settings;
 	}
@@ -36,8 +40,17 @@ public sealed class Settings
 		file.SetValue(Section, "muted", Muted);
 		file.SetValue(Section, "mode", Mode.ToString());
 		file.SetValue(Section, "difficulty", Difficulty.ToString());
+		file.SetValue(Section, "board", Board.ToString());
+		file.SetValue(Section, "beads", Beads.ToString());
 		file.SetValue(Section, "games_since_ad", GamesSinceAd);
 		file.Save(Path);
+	}
+
+	/// <summary>The table is never a choice; fall back if a saved file somehow names it.</summary>
+	private static Style ReadStyle(ConfigFile file, string key, Style fallback)
+	{
+		var style = ReadEnum(file, key, fallback);
+		return style == Style.Table ? fallback : style;
 	}
 
 	private static T ReadEnum<T>(ConfigFile file, string key, T fallback) where T : struct, Enum =>

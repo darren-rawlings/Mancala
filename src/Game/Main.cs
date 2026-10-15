@@ -14,14 +14,14 @@ using Side = Mancala.Core.Side;
 namespace Mancala.Game;
 
 /// <summary>
-/// Pit Stop: Mancala. Ties the Kalah rules to the 3D board: tap one of your pits and its gems lift
-/// out and are sown one by one into the following holes; captures fly to your store in a glowing
-/// arc ("the pit stop"); an extra turn makes your store pulse. The rules decide everything first
-/// (<see cref="Kalah.Sow"/> returns the exact path), then the gems act it out.
+/// Mancala. Ties the Kalah rules to the 3D board: tap one of your pits and its marbles lift out
+/// and are sown one by one into the following holes; captures fly to your store in glowing arcs;
+/// an extra turn makes your store pulse. The rules decide everything first (<see cref="Kalah.Sow"/>
+/// returns the exact path), then the marbles act it out. Drag sideways to spin the board.
 /// </summary>
 public partial class Main : Node3D
 {
-	public const string Title = "Pit Stop";
+	public const string Title = "Mancala";
 
 	/// <summary>
 	/// Google's test ad units until the real ones exist in AdMob (see the release playbook in
@@ -29,17 +29,21 @@ public partial class Main : Node3D
 	/// </summary>
 	private static readonly AdMobConfig AdUnits = AdMobConfig.Test;
 
-	/// <summary>Side One is the player at the bottom-right; against the computer, that's you.</summary>
+	/// <summary>Side One is the near row; against the computer, that's you.</summary>
 	private const Side Human = Side.One;
 
 	private const float MinThinkTime = 0.7f;
+	private const float SpinPerPixel = 0.008f;
+	private const float SpinDamping = 1.6f;
+	private const float DragThreshold = 14f;
 
 	private readonly Kalah _game = new();
 	private readonly Scoreboard _wins = new();
-	private readonly List<Stone>[] _inHole = Enumerable.Range(0, Kalah.Holes).Select(_ => new List<Stone>()).ToArray();
-	private readonly ImpactBank<bool> _clinks = new(onGem => onGem ? Looks.GemOnGem : Looks.GemOnWood);
+	private readonly List<Bead>[] _inHole = Enumerable.Range(0, Kalah.Holes).Select(_ => new List<Bead>()).ToArray();
+	private readonly ImpactBank<Style> _impacts = new(Styles.Impact);
 
 	private Settings _settings = null!;
+	private Node3D _rig = null!;
 	private Board _board = null!;
 	private Camera3D _camera = null!;
 	private SoundPool _sound = null!;
@@ -57,12 +61,22 @@ public partial class Main : Node3D
 	private bool _roundCounted;
 	private Side? _moving;
 
+	private bool _pressing;
+	private bool _dragging;
+	private Vector2 _pressPosition;
+	private float _spinVelocity;
+	private ulong _lastDragUsec;
+
 	private bool _demo;
 	private bool _quitAfterDemo;
+	private float _initialSpin;
 
 	private bool VsComputer => _settings.Mode == GameMode.PlayerVsComputer || _demo;
 
 	private bool IsComputerTurn => !_game.IsOver && (_demo || (VsComputer && _game.Turn != Human));
+
+	/// <summary>The board spins only while every marble is at rest: they ride along frozen in place.</summary>
+	private bool CanSpin => !_busy && _inHole.All(hole => hole.All(bead => !bead.Moving));
 
 	public override void _Ready()
 	{
@@ -103,8 +117,21 @@ public partial class Main : Node3D
 			_wins.Reset();
 			StartGame();
 		};
+		_hud.BoardChosen += style =>
+		{
+			_settings.Board = style;
+			_settings.Save();
+			_board.ApplyStyle(style);
+		};
+		_hud.BeadsChosen += style =>
+		{
+			_settings.Beads = style;
+			_settings.Save();
+			foreach (var bead in AllBeads())
+				bead.ApplyStyle(style);
+		};
 
-		PlaceStonesForNewGame();
+		PlaceBeadsForNewGame();
 		RefreshUi();
 	}
 
@@ -112,10 +139,11 @@ public partial class Main : Node3D
 
 	private void BuildWorld()
 	{
-		// Looking down the board from just past Two's store, steep enough to see into every pit.
-		_camera = new Camera3D { Position = new Vector3(0, 11.2f, 8.4f), Fov = 52 };
+		// The board lies across the screen, seen from your side. Keeping the camera's width fixed
+		// (rather than its height) makes the whole board fit any phone's width.
+		_camera = new Camera3D { Position = new Vector3(0, 9.6f, 6.4f), Fov = 46, KeepAspect = Camera3D.KeepAspectEnum.Width };
 		AddChild(_camera);
-		_camera.LookAt(new Vector3(0, -0.2f, 1.55f));
+		_camera.LookAt(new Vector3(0, -0.3f, 0.25f));
 
 		AddChild(new DirectionalLight3D
 		{
@@ -124,7 +152,7 @@ public partial class Main : Node3D
 			LightColor = new Color("fff1dc"),
 			RotationDegrees = new Vector3(-60, 35, 0),
 		});
-		AddChild(new OmniLight3D { Position = new Vector3(-3, 4, 4), OmniRange = 14, LightEnergy = 0.5f, LightColor = new Color("ffcf9a") });
+		AddChild(new OmniLight3D { Position = new Vector3(-4, 4, 4), OmniRange = 16, LightEnergy = 0.5f, LightColor = new Color("ffcf9a") });
 		AddChild(new WorldEnvironment
 		{
 			Environment = new Godot.Environment
@@ -134,60 +162,88 @@ public partial class Main : Node3D
 				AmbientLightSource = Godot.Environment.AmbientSource.Color,
 				AmbientLightColor = new Color("6e5444"),
 				AmbientLightEnergy = 0.9f,
+				// Something for metal and glass to reflect: without it, silver marbles and a steel board
+				// render nearly black. The sky is only reflected, never seen behind the table.
+				ReflectedLightSource = Godot.Environment.ReflectionSource.Sky,
+				Sky = new Sky
+				{
+					SkyMaterial = new ProceduralSkyMaterial
+					{
+						SkyTopColor = new Color("8a6a52"),
+						SkyHorizonColor = new Color("e8c9a0"),
+						GroundBottomColor = new Color("2a1a10"),
+						GroundHorizonColor = new Color("6e4c34"),
+						SunAngleMax = 30,
+					},
+				},
 			},
 		});
 
-		_board = new Board();
-		_board.Build();
-		AddChild(_board);
+		var table = new StaticBody3D { Position = new Vector3(0, -Thickness, 0) };
+		table.AddChild(new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(160, 160) }, MaterialOverride = Looks.For(Styles.BoardLook(Style.Table)) });
+		table.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
+		AddChild(table);
 
-		_storeGlow = new OmniLight3D { OmniRange = 2.2f, LightEnergy = 0f, LightColor = new Color(1f, 0.7f, 0.3f), ShadowEnabled = false };
-		AddChild(_storeGlow);
+		// Everything that spins with the board: the board itself, its marbles, the store glow.
+		_rig = new Node3D();
+		AddChild(_rig);
+		_rig.RotateY(_initialSpin);
+		_board = new Board();
+		_board.Build(_settings.Board);
+		_rig.AddChild(_board);
+
+		_storeGlow = new OmniLight3D { OmniRange = 2.4f, LightEnergy = 0f, LightColor = new Color(1f, 0.7f, 0.3f), ShadowEnabled = false };
+		_rig.AddChild(_storeGlow);
 
 		WarmUpShaders();
 	}
 
 	/// <summary>
 	/// Phones compile each shader the first time it's drawn, which stalls that frame. Draw the
-	/// capture glow and sparks once at startup, hidden under the table, so the first capture is smooth.
+	/// capture glow, the sparks and every marble material once at startup, hidden under the table.
 	/// </summary>
 	private void WarmUpShaders()
 	{
 		var warm = new Node3D { Position = new Vector3(0, -Thickness - 1f, 0) };
 		AddChild(warm);
-		warm.AddChild(new MeshInstance3D { Mesh = new SphereMesh { Radius = StoneRadius, Height = StoneHeight }, MaterialOverride = Looks.Gem(0), MaterialOverlay = Sparkle.Halo });
+		foreach (var style in Styles.Choices)
+		{
+			warm.AddChild(new MeshInstance3D { Mesh = new SphereMesh { Radius = BeadRadius, Height = BeadRadius * 2 }, MaterialOverride = Looks.For(Styles.BeadLook(style)), MaterialOverlay = Sparkle.Halo });
+			warm.AddChild(new MeshInstance3D { Mesh = new BoxMesh(), MaterialOverride = Looks.For(Styles.BoardLook(style)) });
+		}
 		warm.AddChild(new Sparkle());
 		GetTree().CreateTimer(0.4).Timeout += warm.QueueFree;
 	}
 
-	/// <summary>A random resting spot over a hole, from where a dropped gem falls in.</summary>
+	/// <summary>A random spot over a hole (board space), from where a dropped marble falls in.</summary>
 	private static Vector3 DropPoint(int hole, float height = 0.45f)
 	{
 		var center = HoleCenter(hole);
-		float spreadX = Kalah.IsStore(hole) ? StoreHalfWidth * 0.45f : PitRadius * 0.4f;
-		float spreadZ = Kalah.IsStore(hole) ? StoreHalfLength * 0.6f : PitRadius * 0.4f;
+		float spreadX = Kalah.IsStore(hole) ? StoreHalfX * 0.5f : PitRadius * 0.35f;
+		float spreadZ = Kalah.IsStore(hole) ? StoreHalfZ * 0.6f : PitRadius * 0.35f;
 		return center + new Vector3((float)GD.RandRange(-spreadX, spreadX), height, (float)GD.RandRange(-spreadZ, spreadZ));
 	}
 
-	private void PlaceStonesForNewGame()
+	private IEnumerable<Bead> AllBeads() => _inHole.SelectMany(hole => hole);
+
+	private void PlaceBeadsForNewGame()
 	{
 		_quiet = true;
-		int color = GD.RandRange(0, Looks.GemColors.Length - 1);
 		foreach (int pit in Kalah.PitsOf(Side.One).Concat(Kalah.PitsOf(Side.Two)))
 		{
 			for (int i = 0; i < _game.StonesPerPit; i++)
 			{
-				var stone = new Stone();
-				stone.Setup(color++);
-				stone.Landed += OnStoneLanded;
-				stone.Position = DropPoint(pit, 0.2f + i * 0.12f);
-				stone.Hole = pit;
-				AddChild(stone);
-				stone.Drop(Vector3.Zero);
-				_inHole[pit].Add(stone);
+				var bead = new Bead();
+				bead.Setup(_settings.Beads);
+				bead.Landed += OnBeadLanded;
+				bead.Position = DropPoint(pit, 0.15f + i * 0.26f);
+				bead.Hole = pit;
+				_rig.AddChild(bead);
+				bead.Drop(Vector3.Zero);
+				_inHole[pit].Add(bead);
 			}
 		}
-		GetTree().CreateTimer(1.0).Timeout += () => _quiet = false;
+		GetTree().CreateTimer(1.2).Timeout += () => _quiet = false;
 		RefreshCounts();
 	}
 
@@ -195,17 +251,60 @@ public partial class Main : Node3D
 
 	public override void _UnhandledInput(InputEvent @event)
 	{
-		if (@event is not InputEventMouseButton { ButtonIndex: MouseButton.Left, Pressed: true } click)
+		if (_hud.MenuOpen)
 			return;
-		if (_busy || _hud.MenuOpen || IsComputerTurn || _game.IsOver)
+		switch (@event)
+		{
+			case InputEventMouseButton { ButtonIndex: MouseButton.Left, Pressed: true } press:
+				_pressing = true;
+				_dragging = false;
+				_pressPosition = press.Position;
+				_spinVelocity = 0f;
+				break;
+
+			case InputEventMouseButton { ButtonIndex: MouseButton.Left } release:
+				if (_pressing && !_dragging)
+					TryTap(release.Position);
+				_pressing = false;
+				_dragging = false;
+				break;
+
+			case InputEventMouseMotion motion:
+				if (_pressing && !_dragging && motion.Position.DistanceTo(_pressPosition) > DragThreshold && CanSpin)
+				{
+					_dragging = true;
+					_lastDragUsec = Time.GetTicksUsec();
+				}
+				if (_dragging)
+					Drag(motion.Relative.X);
+				break;
+		}
+	}
+
+	private void Drag(float pixels)
+	{
+		if (!CanSpin)
 			return;
-		var from = _camera.ProjectRayOrigin(click.Position);
-		var direction = _camera.ProjectRayNormal(click.Position);
+		float angle = pixels * SpinPerPixel;
+		_rig.RotateY(angle);
+		ulong now = Time.GetTicksUsec();
+		float dt = Mathf.Max((now - _lastDragUsec) / 1_000_000f, 0.001f);
+		_lastDragUsec = now;
+		// Remember how fast the finger was moving, so a flick keeps the board turning.
+		_spinVelocity = Mathf.Lerp(_spinVelocity, angle / dt, 0.5f);
+	}
+
+	private void TryTap(Vector2 screen)
+	{
+		if (_busy || IsComputerTurn || _game.IsOver)
+			return;
+		var from = _camera.ProjectRayOrigin(screen);
+		var direction = _camera.ProjectRayNormal(screen);
 		if (direction.Y > -0.01f)
 			return;
-		// Aim at the bottom of the bowls rather than the board top, which suits a steep view.
-		var point = from + direction * ((-0.15f - from.Y) / direction.Y);
-		int pit = Board.PitAt(point);
+		// Aim at the bottom of the bowls rather than the board top, which suits an angled view.
+		var world = from + direction * ((-0.2f - from.Y) / direction.Y);
+		int pit = Board.PitAt(_rig.ToLocal(world));
 		if (pit >= 0 && _game.CanSow(pit))
 			_ = PlayMove(pit);
 	}
@@ -215,20 +314,22 @@ public partial class Main : Node3D
 	private async Task PlayMove(int pit)
 	{
 		_busy = true;
+		_spinVelocity = 0f;
 		_board.HighlightPits(null);
 		_hud.SetUndoVisible(false);
+		_hud.HideHint();
 		var result = _game.Sow(pit);
 		DevLog.Write($"frame {Engine.GetProcessFrames()}: {result.Mover} sows {pit}: {result.Picked} stones, extra={result.ExtraTurn}, capture={result.Captured}, over={result.GameOver}");
-		// Until the gems finish moving, the status stays with the mover, not the next player.
+		// Until the marbles finish moving, the status stays with the mover, not the next player.
 		_moving = result.Mover;
 		RefreshUi();
 
-		await SowStones(result);
+		await SowBeads(result);
 		var color = ColorOf(result.Mover);
 		if (result.Captured > 0)
 		{
-			_hud.SetStatus($"Pit stop! +{result.Captured}", color);
-			await CaptureStones(result);
+			_hud.SetStatus($"Capture! +{result.Captured}", color);
+			await CaptureBeads(result);
 		}
 		else if (result.ExtraTurn && !result.GameOver)
 		{
@@ -238,7 +339,7 @@ public partial class Main : Node3D
 		}
 		_moving = null;
 		if (result.GameOver)
-			await SweepStones(result.FinalSweep);
+			await SweepBeads(result.FinalSweep);
 
 		if (_game.IsOver && !_roundCounted)
 		{
@@ -250,10 +351,10 @@ public partial class Main : Node3D
 		RefreshUi();
 	}
 
-	/// <summary>The gems lift out together, then the cluster travels hole to hole, dropping one each time.</summary>
-	private async Task SowStones(SowResult result)
+	/// <summary>The marbles lift out together, then the cluster travels hole to hole, dropping one each time.</summary>
+	private async Task SowBeads(SowResult result)
 	{
-		var hand = new List<Stone>(_inHole[result.From]);
+		var hand = new List<Bead>(_inHole[result.From]);
 		_inHole[result.From].Clear();
 		RefreshCounts();
 
@@ -273,46 +374,46 @@ public partial class Main : Node3D
 				move.TweenProperty(hand[i], "position", HoverPoint(hole, i - step), 0.13f).SetTrans(Tween.TransitionType.Sine);
 			await ToSignal(move, Tween.SignalName.Finished);
 
-			var stone = hand[step];
-			stone.Position = DropPoint(hole, 0.32f);
-			stone.Drop(new Vector3(0, -1.5f, 0));
-			stone.Hole = hole;
-			_inHole[hole].Add(stone);
+			var bead = hand[step];
+			bead.Position = DropPoint(hole, 0.32f);
+			bead.Drop(new Vector3(0, -1.5f, 0));
+			bead.Hole = hole;
+			_inHole[hole].Add(bead);
 			RefreshCounts();
 		}
 		await Wait(0.35f);
 	}
 
-	/// <summary>Where a carried gem floats: a loose little cluster above a hole.</summary>
+	/// <summary>Where a carried marble floats: a loose little cluster above a hole.</summary>
 	private static Vector3 HoverPoint(int hole, int index)
 	{
 		float angle = index * 2.4f;
-		float radius = 0.05f + 0.025f * Mathf.Sqrt(index);
-		return HoleCenter(hole) + new Vector3(Mathf.Cos(angle) * radius, 0.65f + index * 0.012f, Mathf.Sin(angle) * radius);
+		float radius = 0.05f + 0.03f * Mathf.Sqrt(index);
+		return HoleCenter(hole) + new Vector3(Mathf.Cos(angle) * radius, 0.65f + index * 0.015f, Mathf.Sin(angle) * radius);
 	}
 
 	/// <summary>
-	/// "The pit stop": the captured gems flare with light and fly to the store in a glowing arc,
-	/// leaving a trail of sparks, then land with a rising run of clinks.
+	/// The capture: sparks burst from the pit, then the marbles flare with light and fly to the
+	/// store in glowing arcs trailing sparks, landing with a rising run of clinks.
 	/// </summary>
-	private async Task CaptureStones(SowResult result)
+	private async Task CaptureBeads(SowResult result)
 	{
 		int store = Kalah.StoreOf(result.Mover);
 		int last = result.Path[^1];
 		var taken = _inHole[result.CaptureFrom].Concat(_inHole[last]).ToList();
-		Sparkle.Burst(this, HoleCenter(result.CaptureFrom) + new Vector3(0, 0.3f, 0));
 		_inHole[result.CaptureFrom].Clear();
 		_inHole[last].Clear();
+		Sparkle.Burst(_rig, HoleCenter(result.CaptureFrom) + new Vector3(0, 0.3f, 0));
 
 		for (int i = 0; i < taken.Count; i++)
 		{
-			var stone = taken[i];
-			stone.Hold();
-			stone.Mesh.MaterialOverlay = Sparkle.Halo;
+			var bead = taken[i];
+			bead.Hold();
+			bead.Mesh.MaterialOverlay = Sparkle.Halo;
 			var sparkle = new Sparkle();
-			stone.AddChild(sparkle);
+			bead.AddChild(sparkle);
 
-			var start = stone.Position;
+			var start = bead.Position;
 			var end = DropPoint(store, 0.4f);
 			var peak = (start + end) / 2 + new Vector3(0, 2.2f, 0);
 			var flight = CreateTween();
@@ -322,19 +423,19 @@ public partial class Main : Node3D
 				// A quadratic Bézier: up, over and down into the store.
 				var a = start.Lerp(peak, t);
 				var b = peak.Lerp(end, t);
-				stone.Position = a.Lerp(b, t);
+				bead.Position = a.Lerp(b, t);
 			}), 0f, 1f, 0.55f).SetTrans(Tween.TransitionType.Sine).SetEase(Tween.EaseType.InOut);
 			int index = i;
 			flight.TweenCallback(Callable.From(() =>
 			{
-				stone.Hole = store;
-				_inHole[store].Add(stone);
-				stone.Drop(new Vector3(0, -1f, 0));
+				bead.Hole = store;
+				_inHole[store].Add(bead);
+				bead.Drop(new Vector3(0, -1f, 0));
 				sparkle.Finish();
 				RefreshCounts();
 				// Each landing a little louder, so a big capture rings up like a payout.
-				_sound.PlayImpact(_clinks.Random(true), stone.GlobalPosition, 0.8f, 2f + index * 0.4f);
-				GetTree().CreateTimer(0.6).Timeout += () => stone.Mesh.MaterialOverlay = null;
+				_sound.PlayImpact(_impacts.Random(_settings.Beads), bead.GlobalPosition, 0.8f, Styles.GainDb(_settings.Beads) + 2f + index * 0.4f);
+				GetTree().CreateTimer(0.6).Timeout += () => bead.Mesh.MaterialOverlay = null;
 			}));
 		}
 		PulseStore(store);
@@ -350,8 +451,8 @@ public partial class Main : Node3D
 		tween.TweenProperty(_storeGlow, "light_energy", 0f, 0.7f);
 	}
 
-	/// <summary>Game over: the gems left on each side slide into their owner's store.</summary>
-	private async Task SweepStones(IReadOnlyList<(int Hole, int Stones)> sweep)
+	/// <summary>Game over: the marbles left on each side slide into their owner's store.</summary>
+	private async Task SweepBeads(IReadOnlyList<(int Hole, int Stones)> sweep)
 	{
 		if (sweep.Count == 0)
 			return;
@@ -360,43 +461,43 @@ public partial class Main : Node3D
 		foreach (var (hole, _) in sweep)
 		{
 			int store = Kalah.StoreOf(Kalah.OwnerOf(hole));
-			foreach (var stone in _inHole[hole].ToList())
-				Carry(stone, store, i++ * 0.05f);
+			foreach (var bead in _inHole[hole].ToList())
+				Carry(bead, store, i++ * 0.05f);
 			_inHole[hole].Clear();
 		}
 		RefreshCounts();
 		await Wait(0.6f + i * 0.05f);
 	}
 
-	/// <summary>Lifts a gem and drops it into another hole (used to rearrange the board).</summary>
-	private void Carry(Stone stone, int hole, float delay)
+	/// <summary>Lifts a marble and drops it into another hole (used to rearrange the board).</summary>
+	private void Carry(Bead bead, int hole, float delay)
 	{
-		stone.Hold();
-		stone.Hole = hole;
-		if (!_inHole[hole].Contains(stone))
-			_inHole[hole].Add(stone);
+		bead.Hold();
+		bead.Hole = hole;
+		if (!_inHole[hole].Contains(bead))
+			_inHole[hole].Add(bead);
 		var target = DropPoint(hole, 0.5f);
 		var tween = CreateTween();
 		tween.TweenInterval(delay);
-		tween.TweenProperty(stone, "position", stone.Position with { Y = 0.8f }, 0.15f);
-		tween.TweenProperty(stone, "position", target, 0.3f).SetTrans(Tween.TransitionType.Sine);
-		tween.TweenCallback(Callable.From(() => stone.Drop(new Vector3(0, -1f, 0))));
+		tween.TweenProperty(bead, "position", bead.Position with { Y = 0.8f }, 0.15f);
+		tween.TweenProperty(bead, "position", target, 0.3f).SetTrans(Tween.TransitionType.Sine);
+		tween.TweenCallback(Callable.From(() => bead.Drop(new Vector3(0, -1f, 0))));
 	}
 
 	/// <summary>
-	/// Moves gems so the board matches the rules again, carrying each surplus gem to a hole that's
-	/// short. Used for a new game and after Undo.
+	/// Moves marbles so the board matches the rules again, carrying each surplus marble to a hole
+	/// that's short. Used for a new game and after Undo.
 	/// </summary>
 	private async Task MatchBoardToRules()
 	{
-		var spare = new List<Stone>();
+		var spare = new List<Bead>();
 		for (int hole = 0; hole < Kalah.Holes; hole++)
 		{
 			while (_inHole[hole].Count > _game[hole])
 			{
-				var stone = _inHole[hole][^1];
+				var bead = _inHole[hole][^1];
 				_inHole[hole].RemoveAt(_inHole[hole].Count - 1);
-				spare.Add(stone);
+				spare.Add(bead);
 			}
 		}
 		int moved = 0;
@@ -404,49 +505,63 @@ public partial class Main : Node3D
 		{
 			while (_inHole[hole].Count < _game[hole] && spare.Count > 0)
 			{
-				var stone = spare[^1];
+				var bead = spare[^1];
 				spare.RemoveAt(spare.Count - 1);
-				Carry(stone, hole, moved++ * 0.03f);
+				Carry(bead, hole, moved++ * 0.03f);
 			}
 		}
 		RefreshCounts();
 		await Wait(0.5f + moved * 0.03f);
 	}
 
-	private void OnStoneLanded(Stone stone, float speed, Node other)
+	/// <summary>A marble on a marble sounds of the marbles; on the board, of the board; off the board, of the table.</summary>
+	private void OnBeadLanded(Bead bead, float speed, Node other)
 	{
 		if (_quiet || speed < 0.6f)
 			return;
-		_sound.PlayImpact(_clinks.Random(other is Stone), stone.GlobalPosition, Mathf.Clamp(speed / 5f, 0.15f, 1f));
+		var surface = other switch
+		{
+			Bead => _settings.Beads,
+			_ when other == _board.Body => _board.Style,
+			_ => Style.Table,
+		};
+		_sound.PlayImpact(_impacts.Random(surface), bead.GlobalPosition, Mathf.Clamp(speed / 5f, 0.15f, 1f), Styles.GainDb(surface));
 	}
 
-	// ---------------------------------------------------------------- Computer
+	// ---------------------------------------------------------------- Per frame
 
-	public override void _Process(double delta) => UpdateComputer((float)delta);
+	public override void _Process(double delta)
+	{
+		float dt = (float)delta;
+		UpdateComputer(dt);
+		if (!_dragging && _spinVelocity != 0f)
+		{
+			if (!CanSpin || Mathf.Abs(_spinVelocity) < 0.02f)
+				_spinVelocity = 0f;
+			_rig.RotateY(_spinVelocity * dt);
+			_spinVelocity *= Mathf.Exp(-SpinDamping * dt);
+		}
+	}
 
 	public override void _PhysicsProcess(double delta)
 	{
-		// Now and then, put back any gem that bounced out of its hole or off the board, so what you
-		// see always matches the counts.
+		// Now and then, put back any marble that rolled out of its hole or off the board, so what
+		// you see always matches the counts.
 		_escapeCheck += (float)delta;
 		if (_escapeCheck < 0.5f || _busy)
 			return;
 		_escapeCheck = 0f;
-		foreach (var stones in _inHole)
+		foreach (var bead in AllBeads())
 		{
-			foreach (var stone in stones)
-			{
-				if (stone.Freeze)
-					continue;
-				var offset = stone.Position - HoleCenter(stone.Hole);
-				bool outside = new Vector2(offset.X, offset.Z).Length() > HoleReach(stone.Hole) + 0.12f || stone.Position.Y < -0.6f;
-				if (!outside)
-					continue;
-				DevLog.Write($"stone escaped from hole {stone.Hole}, putting it back");
-				stone.Hold();
-				stone.Position = DropPoint(stone.Hole, 0.5f);
-				stone.Drop(Vector3.Zero);
-			}
+			if (!bead.Moving)
+				continue;
+			bool outside = DistanceToRim(bead.Hole, bead.Position) > 0.15f || bead.Position.Y < -StoreDepth - 0.2f;
+			if (!outside)
+				continue;
+			DevLog.Write($"marble escaped from hole {bead.Hole}, putting it back");
+			bead.Hold();
+			bead.Position = DropPoint(bead.Hole, 0.5f);
+			bead.Drop(Vector3.Zero);
 		}
 	}
 
@@ -601,7 +716,8 @@ public partial class Main : Node3D
 
 	/// <summary>
 	/// Developer flags after `--` (or in user://dev_args.txt on a phone): `--log`, `--demo`
-	/// (the computer plays both sides), `--quit-after-demo`, `--games-since-ad=4`.
+	/// (the computer plays both sides), `--quit-after-demo`, `--games-since-ad=4`,
+	/// `--board=Wood`, `--beads=Glass`, `--spin=30` (degrees). Style flags aren't saved.
 	/// </summary>
 	private void ReadDeveloperArgs()
 	{
@@ -621,6 +737,15 @@ public partial class Main : Node3D
 					break;
 				case "--games-since-ad":
 					_adSchedule = new AdSchedule(int.Parse(value));
+					break;
+				case "--board" when System.Enum.TryParse(value, out Style board):
+					_settings.Board = board;
+					break;
+				case "--beads" when System.Enum.TryParse(value, out Style beads):
+					_settings.Beads = beads;
+					break;
+				case "--spin":
+					_initialSpin = Mathf.DegToRad(float.Parse(value, System.Globalization.CultureInfo.InvariantCulture));
 					break;
 			}
 		}

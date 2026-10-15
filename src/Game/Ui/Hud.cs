@@ -14,6 +14,8 @@ public partial class Hud : CanvasLayer
 	public event Action? UndoPressed;
 	public event Action<bool>? MuteToggled;
 	public event Action<GameMode, Difficulty>? ModeChosen;
+	public event Action<Style>? BoardChosen;
+	public event Action<Style>? BeadsChosen;
 
 	private Label _score = null!;
 	private Label _status = null!;
@@ -23,6 +25,8 @@ public partial class Hud : CanvasLayer
 	private Button _pvp = null!;
 	private Button _pvc = null!;
 	private Control _difficultyPopup = null!;
+	private Control _menu = null!;
+	private Label _hint = null!;
 
 	public void Build(string title, Settings settings)
 	{
@@ -63,11 +67,32 @@ public partial class Hud : CanvasLayer
 		SetMuteText(muted);
 		AddChild(_mute);
 
+		_hint = MakeLabel("Tap a glowing pit  ·  Drag sideways to spin", 24, Palette.TextMuted);
+		Anchor(_hint, Control.LayoutPreset.BottomWide, top: -290, bottom: -254);
+		AddChild(_hint);
+
+		var style = MakeButton("Style", 24, Palette.ButtonDark);
+		Anchor(style, Control.LayoutPreset.TopLeft, left: 20, right: 140, top: 160, bottom: 212);
+		style.Pressed += () => _menu.Visible = true;
+		AddChild(style);
+
 		BuildModeButtons(settings.Mode, settings.Difficulty);
+
+		_menu = BuildMenu(settings.Board, settings.Beads);
+		_menu.Visible = false;
+		AddChild(_menu);
 	}
 
-	/// <summary>True while the difficulty pop-up is open; the board ignores taps meanwhile.</summary>
-	public bool MenuOpen => _difficultyPopup.Visible;
+	/// <summary>True while a menu or pop-up is open; the board ignores taps meanwhile.</summary>
+	public bool MenuOpen => _difficultyPopup.Visible || _menu.Visible;
+
+	/// <summary>The controls hint fades after the first move; it's only needed once.</summary>
+	public void HideHint()
+	{
+		if (_hint.Modulate.A < 1f)
+			return;
+		CreateTween().TweenProperty(_hint, "modulate:a", 0f, 0.6f);
+	}
 
 	public void SetStatus(string text, Color color)
 	{
@@ -150,6 +175,57 @@ public partial class Hud : CanvasLayer
 		_pvc.Text = vsComputer ? $"vs Computer: {difficulty}" : "vs Computer";
 		Restyle(_pvp, vsComputer ? Palette.ButtonDark : Palette.Accent);
 		Restyle(_pvc, vsComputer ? Palette.Accent : Palette.ButtonDark);
+	}
+
+	private Control BuildMenu(Style board, Style beads)
+	{
+		// A light scrim blocks taps on the board while still showing style changes live behind it.
+		var scrim = new ColorRect { Color = new Color(0, 0, 0, 0.25f), MouseFilter = Control.MouseFilterEnum.Stop };
+		scrim.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+
+		var panel = new PanelContainer();
+		var box = new StyleBoxFlat { BgColor = Palette.Panel, AntiAliasing = true };
+		box.SetCornerRadiusAll(28);
+		box.SetContentMarginAll(28);
+		panel.AddThemeStyleboxOverride("panel", box);
+		Anchor(panel, Control.LayoutPreset.BottomWide, left: 24, right: -24, top: -560, bottom: -24);
+		scrim.AddChild(panel);
+
+		var column = new VBoxContainer();
+		column.AddThemeConstantOverride("separation", 16);
+		panel.AddChild(column);
+
+		column.AddChild(MakeLabel("Board", 30, Palette.TextMuted));
+		column.AddChild(MakeChoices(Styles.Choices, board, Styles.BoardName, s => BoardChosen?.Invoke(s)));
+		column.AddChild(MakeLabel("Marbles", 30, Palette.TextMuted));
+		column.AddChild(MakeChoices(Styles.Choices, beads, Styles.BeadName, s => BeadsChosen?.Invoke(s)));
+
+		var done = MakeButton("Done", 30, Palette.Accent);
+		done.CustomMinimumSize = new Vector2(0, 70);
+		done.Pressed += () => _menu.Visible = false;
+		column.AddChild(done);
+		return scrim;
+	}
+
+	private static GridContainer MakeChoices<T>(T[] choices, T selected, Func<T, string> name, Action<T> chosen)
+		where T : struct, Enum
+	{
+		var grid = new GridContainer { Columns = 3 };
+		grid.AddThemeConstantOverride("h_separation", 12);
+		grid.AddThemeConstantOverride("v_separation", 12);
+		var group = new ButtonGroup();
+		foreach (var choice in choices)
+		{
+			var button = MakeButton(name(choice), 26, Palette.ButtonDark);
+			button.ToggleMode = true;
+			button.ButtonGroup = group;
+			button.ButtonPressed = choice.Equals(selected);
+			button.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+			button.CustomMinimumSize = new Vector2(0, 64);
+			button.Pressed += () => chosen(choice);
+			grid.AddChild(button);
+		}
+		return grid;
 	}
 
 	private void SetMuteText(bool muted) => _mute.Text = muted ? "Sound: Off" : "Sound: On";
