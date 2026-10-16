@@ -10,6 +10,8 @@ using Renegade.Core;
 using Renegade.Dev;
 using static Mancala.Game.BoardLayout;
 using Side = Mancala.Core.Side;
+using Scoreboard = Mancala.Core.Scoreboard;
+using Difficulty = Mancala.Core.Difficulty;
 
 namespace Mancala.Game;
 
@@ -81,6 +83,8 @@ public partial class Main : Node3D
 	public override void _Ready()
 	{
 		DevLog.Tag = "man";
+		// Flight recorder: checks every sound reaches the output and logs pauses, focus and ads to user://blackbox.log.
+		AudioWatch.Attach(this, Title);
 		_settings = Settings.Load();
 		ReadDeveloperArgs();
 		AudioServer.SetBusMute(0, _settings.Muted);
