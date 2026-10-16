@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Godot;
 using Mancala.Core;
+using Renegade.Looks;
 using static Mancala.Game.BoardLayout;
 
 namespace Mancala.Game;
@@ -27,6 +28,10 @@ public partial class Board : Node3D
 		AlbedoColor = new Color(1f, 0.78f, 0.35f, 0.75f),
 		Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
 	};
+
+	/// <summary>The stores' paint: each player's colour (gold near you, blue across the board).</summary>
+	public static readonly Color StoreOneColour = new("b8862f");
+	public static readonly Color StoreTwoColour = new("2f6aa8");
 
 	public Style Style { get; private set; }
 
@@ -58,6 +63,17 @@ public partial class Board : Node3D
 		}
 		foreach (var surface in _surfaces)
 			AddChild(surface);
+
+		// Each store is painted in its owner's colour.
+		foreach (var (store, colour) in new[] { (Kalah.StoreOne, StoreOneColour), (Kalah.StoreTwo, StoreTwoColour) })
+		{
+			AddChild(new MeshInstance3D
+			{
+				Mesh = StorePaint(store),
+				MaterialOverride = Materials.For(new Look(Look.PlasticPattern, colour, colour.Darkened(0.35f), 0.6f)),
+				CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+			});
+		}
 
 		Body.AddChild(new CollisionShape3D { Shape = TopCollision(), Scale = Vector3.One * CollisionCell });
 		Body.AddChild(new CollisionShape3D
@@ -109,13 +125,20 @@ public partial class Board : Node3D
 	public void ApplyStyle(Style style)
 	{
 		Style = style;
-		var material = Looks.For(Styles.BoardLook(style));
+		var material = Materials.For(Styles.BoardLook(style));
 		foreach (var surface in _surfaces)
 			surface.MaterialOverride = material;
 		Body.PhysicsMaterialOverride = new PhysicsMaterial { Bounce = Styles.Bounce(style), Friction = 0.8f };
 	}
 
 	public void SetCount(int hole, int count) => _counts[hole].Text = count.ToString();
+
+	/// <summary>Shows or hides the numbers by the pits and by the stores (Settings).</summary>
+	public void ShowCounts(bool pits, bool stores)
+	{
+		for (int hole = 0; hole < Kalah.Holes; hole++)
+			_counts[hole].Visible = Kalah.IsStore(hole) ? stores : pits;
+	}
 
 	/// <summary>Lights the rings round the pits that can be played now; pass nothing to turn them all off.</summary>
 	public void HighlightPits(IEnumerable<int>? pits)
@@ -147,6 +170,64 @@ public partial class Board : Node3D
 				return hole;
 		}
 		return -1;
+	}
+
+	/// <summary>
+	/// A coat of paint lining a store: rings of the store's rounded-rectangle outline, each a little
+	/// further in, following the carved surface just above it. Rings rather than a grid, so the
+	/// paint's edge runs smoothly round the rim.
+	/// </summary>
+	private static ArrayMesh StorePaint(int store)
+	{
+		const int perCorner = 8;
+		const float step = 0.02f;
+		var center = HoleCenter(store);
+		var rings = new List<Vector3[]>();
+		for (float inset = 0f; ; inset += step)
+		{
+			inset = Mathf.Min(inset, StoreHalfX);
+			float hx = StoreHalfX - inset, hz = StoreHalfZ - inset, corner = Mathf.Max(StoreCorner - inset, 0f);
+			var ring = new Vector3[perCorner * 4];
+			for (int c = 0; c < 4; c++)
+			{
+				float sx = c is 0 or 3 ? 1 : -1, sz = c < 2 ? 1 : -1;
+				for (int k = 0; k < perCorner; k++)
+				{
+					float angle = (c + (float)k / (perCorner - 1)) * Mathf.Pi / 2;
+					float x = center.X + sx * (hx - corner) + corner * Mathf.Cos(angle);
+					float z = center.Z + sz * (hz - corner) + corner * Mathf.Sin(angle);
+					ring[c * perCorner + k] = new Vector3(x, SurfaceHeight(x, z) + 0.005f, z);
+				}
+			}
+			rings.Add(ring);
+			if (inset >= StoreHalfX)
+				break;
+		}
+
+		var tool = new SurfaceTool();
+		tool.Begin(Mesh.PrimitiveType.Triangles);
+		int count = perCorner * 4;
+		foreach (var ring in rings)
+		{
+			foreach (var point in ring)
+				tool.AddVertex(point);
+		}
+		for (int r = 0; r + 1 < rings.Count; r++)
+		{
+			for (int j = 0; j < count; j++)
+			{
+				int a = r * count + j, a2 = r * count + (j + 1) % count;
+				int b = (r + 1) * count + j, b2 = (r + 1) * count + (j + 1) % count;
+				tool.AddIndex(a);
+				tool.AddIndex(a2);
+				tool.AddIndex(b);
+				tool.AddIndex(a2);
+				tool.AddIndex(b2);
+				tool.AddIndex(b);
+			}
+		}
+		tool.GenerateNormals();
+		return tool.Commit();
 	}
 
 	private static ArrayMesh TopMesh()

@@ -3,15 +3,15 @@ using System.Linq;
 using System.Threading.Tasks;
 using Godot;
 using Mancala.Core;
-using Mancala.Game.Ui;
 using Renegade.Ads;
 using Renegade.Audio;
 using Renegade.Core;
 using Renegade.Dev;
+using Renegade.Looks;
+using Renegade.Play;
+using Renegade.Ui;
 using static Mancala.Game.BoardLayout;
 using Side = Mancala.Core.Side;
-using Scoreboard = Mancala.Core.Scoreboard;
-using Difficulty = Mancala.Core.Difficulty;
 
 namespace Mancala.Game;
 
@@ -19,7 +19,8 @@ namespace Mancala.Game;
 /// Mancala. Ties the Kalah rules to the 3D board: tap one of your pits and its marbles lift out
 /// and are sown one by one into the following holes; captures fly to your store in glowing arcs;
 /// an extra turn makes your store pulse. The rules decide everything first (<see cref="Kalah.Sow"/>
-/// returns the exact path), then the marbles act it out. Drag sideways to spin the board.
+/// returns the exact path), then the marbles act it out. Drag sideways to spin the board. Built
+/// on the studio kit (renegade-core): its HUD, Settings, tutorial, looks and fire.
 /// </summary>
 public partial class Main : Node3D
 {
@@ -35,23 +36,26 @@ public partial class Main : Node3D
 	private const Side Human = Side.One;
 
 	private const float MinThinkTime = 0.7f;
-	private const float SpinPerPixel = 0.008f;
-	private const float SpinDamping = 1.6f;
-	private const float DragThreshold = 14f;
+
+	/// <summary>Each side's colour in the status line and score: gold near you, blue across.</summary>
+	private static readonly Color SideOneColour = new("ffcc66");
+	private static readonly Color SideTwoColour = new("8fd3ff");
 
 	private readonly Kalah _game = new();
 	private readonly Scoreboard _wins = new();
 	private readonly List<Bead>[] _inHole = Enumerable.Range(0, Kalah.Holes).Select(_ => new List<Bead>()).ToArray();
 	private readonly ImpactBank<Style> _impacts = new(Styles.Impact);
+	private readonly List<Flames> _fires = new();
 
-	private Settings _settings = null!;
+	private GameSettings _settings = null!;
 	private Node3D _rig = null!;
 	private Board _board = null!;
 	private Camera3D _camera = null!;
 	private SoundPool _sound = null!;
-	private Hud _hud = null!;
+	private GameHud _hud = null!;
 	private IAdService _ads = null!;
 	private AdSchedule? _adSchedule;
+	private SpinControl _spin = null!;
 	private OmniLight3D _storeGlow = null!;
 
 	private bool _busy;
@@ -63,29 +67,39 @@ public partial class Main : Node3D
 	private bool _roundCounted;
 	private Side? _moving;
 
-	private bool _pressing;
-	private bool _dragging;
-	private Vector2 _pressPosition;
-	private float _spinVelocity;
-	private ulong _lastDragUsec;
-
 	private bool _demo;
 	private bool _quitAfterDemo;
+	private string? _clip;
 	private float _initialSpin;
+	private bool _spinTest;
 
 	private bool VsComputer => _settings.Mode == GameMode.PlayerVsComputer || _demo;
 
 	private bool IsComputerTurn => !_game.IsOver && (_demo || (VsComputer && _game.Turn != Human));
 
 	/// <summary>The board spins only while every marble is at rest: they ride along frozen in place.</summary>
-	private bool CanSpin => !_busy && _inHole.All(hole => hole.All(bead => !bead.Moving));
+	private bool CanSpin => !_busy && !_settings.FreezeBoard && _inHole.All(hole => hole.All(bead => !bead.Moving));
+
+	// Mancala's own settings, kept in GameSettings.Extra.
+	private bool ShowPitCounts => Flag("pit_numbers", true);
+	private bool ShowStoreCounts => Flag("store_totals", true);
+
+	private BeadShape Shape =>
+		_settings.Extra.TryGetValue("marble_shape", out var saved) && System.Enum.TryParse(saved, out BeadShape shape) ? shape : BeadShape.Round;
+
+	private bool Flag(string key, bool fallback) =>
+		_settings.Extra.TryGetValue(key, out var saved) && bool.TryParse(saved, out bool value) ? value : fallback;
 
 	public override void _Ready()
 	{
 		DevLog.Tag = "man";
 		// Flight recorder: checks every sound reaches the output and logs pauses, focus and ads to user://blackbox.log.
 		AudioWatch.Attach(this, Title);
-		_settings = Settings.Load();
+		_settings = GameSettings.Load(board: Style.Wood, pieces: Style.Glass);
+		// Settings from before the kit: same file, but the marbles were saved as "beads".
+		var old = new ConfigFile();
+		if (old.Load("user://settings.cfg") == Error.Ok && !old.HasSectionKey("settings", "pieces") && old.HasSectionKey("settings", "beads") && System.Enum.TryParse(old.GetValue("settings", "beads").AsString(), out Style beads))
+			_settings.Pieces = beads;
 		ReadDeveloperArgs();
 		AudioServer.SetBusMute(0, _settings.Muted);
 		BuildWorld();
@@ -94,25 +108,41 @@ public partial class Main : Node3D
 		AddChild(_sound);
 
 		_adSchedule ??= new AdSchedule(_settings.GamesSinceAd);
+		var theme = HudTheme.Warm;
 		_ads = AdServices.Create(this, AdUnits, _demo, new PlaceholderAds
 		{
-			TextColor = Palette.Text,
+			TextColor = theme.Text,
 			RewardTitle = "Watch to undo your move",
 			ClaimText = "Claim undo",
 			SkipText = "Skip (no undo)",
 		});
 
-		_hud = new Hud();
+		_hud = new GameHud(theme);
 		AddChild(_hud);
-		_hud.Build(Title, _settings);
+		_hud.Build(new HudOptions(Title, "Tap a glowing pit  ·  Drag sideways to spin", PiecesLabel: "Marbles",
+			PieceName: s => Styles.Solo(s).Name), _settings);
 		_hud.NewGamePressed += OnNewGamePressed;
 		_hud.UndoPressed += OnUndoPressed;
-		_hud.MuteToggled += muted =>
+		_hud.RestartPressed += OnRestartPressed;
+		_hud.SetTutorial(Tutorial.Pages);
+		_hud.AddToggle("Pit numbers", ShowPitCounts, on =>
 		{
-			_settings.Muted = muted;
-			AudioServer.SetBusMute(0, muted);
+			_settings.Extra["pit_numbers"] = on.ToString();
 			_settings.Save();
-		};
+			_board.ShowCounts(ShowPitCounts, ShowStoreCounts);
+		});
+		_hud.AddToggle("Store totals", ShowStoreCounts, on =>
+		{
+			_settings.Extra["store_totals"] = on.ToString();
+			_settings.Save();
+			_board.ShowCounts(ShowPitCounts, ShowStoreCounts);
+		});
+		_hud.AddChoice("Marble shape", Bead.ShapeNames, (int)Shape, index =>
+		{
+			_settings.Extra["marble_shape"] = ((BeadShape)index).ToString();
+			_settings.Save();
+			ReshapeBeads();
+		});
 		_hud.ModeChosen += (mode, difficulty) =>
 		{
 			_settings.Mode = mode;
@@ -127,16 +157,33 @@ public partial class Main : Node3D
 			_settings.Save();
 			_board.ApplyStyle(style);
 		};
-		_hud.BeadsChosen += style =>
+		_hud.PiecesChosen += style =>
 		{
-			_settings.Beads = style;
+			_settings.Pieces = style;
 			_settings.Save();
 			foreach (var bead in AllBeads())
 				bead.ApplyStyle(style);
 		};
 
+		_spin = new SpinControl(_rig, () => CanSpin);
+		_spin.Tapped += TryTap;
+		_board.ShowCounts(ShowPitCounts, ShowStoreCounts);
 		PlaceBeadsForNewGame();
 		RefreshUi();
+		if (_spinTest)
+		{
+			_ = SpinTest();
+			return;
+		}
+		if (_clip != null)
+		{
+			_hud.Visible = false;
+			_ = PlayClip(_clip);
+			return;
+		}
+		if (!_demo)
+			_hud.OfferTutorialOnce(_settings);
+		_hud.ApplyDevFlags();
 	}
 
 	// ---------------------------------------------------------------- World
@@ -148,45 +195,7 @@ public partial class Main : Node3D
 		_camera = new Camera3D { Position = new Vector3(0, 9.6f, 6.4f), Fov = 46, KeepAspect = Camera3D.KeepAspectEnum.Width };
 		AddChild(_camera);
 		_camera.LookAt(new Vector3(0, -0.3f, 0.25f));
-
-		AddChild(new DirectionalLight3D
-		{
-			ShadowEnabled = true,
-			LightEnergy = 1.15f,
-			LightColor = new Color("fff1dc"),
-			RotationDegrees = new Vector3(-60, 35, 0),
-		});
-		AddChild(new OmniLight3D { Position = new Vector3(-4, 4, 4), OmniRange = 16, LightEnergy = 0.5f, LightColor = new Color("ffcf9a") });
-		AddChild(new WorldEnvironment
-		{
-			Environment = new Godot.Environment
-			{
-				BackgroundMode = Godot.Environment.BGMode.Color,
-				BackgroundColor = new Color("1a0f09"),
-				AmbientLightSource = Godot.Environment.AmbientSource.Color,
-				AmbientLightColor = new Color("6e5444"),
-				AmbientLightEnergy = 0.9f,
-				// Something for metal and glass to reflect: without it, silver marbles and a steel board
-				// render nearly black. The sky is only reflected, never seen behind the table.
-				ReflectedLightSource = Godot.Environment.ReflectionSource.Sky,
-				Sky = new Sky
-				{
-					SkyMaterial = new ProceduralSkyMaterial
-					{
-						SkyTopColor = new Color("8a6a52"),
-						SkyHorizonColor = new Color("e8c9a0"),
-						GroundBottomColor = new Color("2a1a10"),
-						GroundHorizonColor = new Color("6e4c34"),
-						SunAngleMax = 30,
-					},
-				},
-			},
-		});
-
-		var table = new StaticBody3D { Position = new Vector3(0, -Thickness, 0) };
-		table.AddChild(new MeshInstance3D { Mesh = new PlaneMesh { Size = new Vector2(160, 160) }, MaterialOverride = Looks.For(Styles.BoardLook(Style.Table)) });
-		table.AddChild(new CollisionShape3D { Shape = new WorldBoundaryShape3D() });
-		AddChild(table);
+		Stage.Build(this, -Thickness, new Color("1a0f09"));
 
 		// Everything that spins with the board: the board itself, its marbles, the store glow.
 		_rig = new Node3D();
@@ -199,24 +208,8 @@ public partial class Main : Node3D
 		_storeGlow = new OmniLight3D { OmniRange = 2.4f, LightEnergy = 0f, LightColor = new Color(1f, 0.7f, 0.3f), ShadowEnabled = false };
 		_rig.AddChild(_storeGlow);
 
-		WarmUpShaders();
-	}
-
-	/// <summary>
-	/// Phones compile each shader the first time it's drawn, which stalls that frame. Draw the
-	/// capture glow, the sparks and every marble material once at startup, hidden under the table.
-	/// </summary>
-	private void WarmUpShaders()
-	{
-		var warm = new Node3D { Position = new Vector3(0, -Thickness - 1f, 0) };
-		AddChild(warm);
-		foreach (var style in Styles.Choices)
-		{
-			warm.AddChild(new MeshInstance3D { Mesh = new SphereMesh { Radius = BeadRadius, Height = BeadRadius * 2 }, MaterialOverride = Looks.For(Styles.BeadLook(style)), MaterialOverlay = Sparkle.Halo });
-			warm.AddChild(new MeshInstance3D { Mesh = new BoxMesh(), MaterialOverride = Looks.For(Styles.BoardLook(style)) });
-		}
-		warm.AddChild(new Sparkle());
-		GetTree().CreateTimer(0.4).Timeout += warm.QueueFree;
+		// Phones compile each shader the first time it's drawn: draw every marble look once up front.
+		Stage.WarmUp(this, -Thickness, Styles.Choices.Select(style => (Material)Materials.For(Styles.Solo(style).Look)).Append(Sparkle.Halo).ToArray());
 	}
 
 	/// <summary>A random spot over a hole (board space), from where a dropped marble falls in.</summary>
@@ -238,7 +231,7 @@ public partial class Main : Node3D
 			for (int i = 0; i < _game.StonesPerPit; i++)
 			{
 				var bead = new Bead();
-				bead.Setup(_settings.Beads);
+				bead.Setup(_settings.Pieces, Shape);
 				bead.Landed += OnBeadLanded;
 				bead.Position = DropPoint(pit, 0.15f + i * 0.26f);
 				bead.Hole = pit;
@@ -255,47 +248,28 @@ public partial class Main : Node3D
 
 	public override void _UnhandledInput(InputEvent @event)
 	{
-		if (_hud.MenuOpen)
-			return;
-		switch (@event)
-		{
-			case InputEventMouseButton { ButtonIndex: MouseButton.Left, Pressed: true } press:
-				_pressing = true;
-				_dragging = false;
-				_pressPosition = press.Position;
-				_spinVelocity = 0f;
-				break;
-
-			case InputEventMouseButton { ButtonIndex: MouseButton.Left } release:
-				if (_pressing && !_dragging)
-					TryTap(release.Position);
-				_pressing = false;
-				_dragging = false;
-				break;
-
-			case InputEventMouseMotion motion:
-				if (_pressing && !_dragging && motion.Position.DistanceTo(_pressPosition) > DragThreshold && CanSpin)
-				{
-					_dragging = true;
-					_lastDragUsec = Time.GetTicksUsec();
-				}
-				if (_dragging)
-					Drag(motion.Relative.X);
-				break;
-		}
+		if (!_hud.MenuOpen)
+			_spin.HandleInput(@event);
 	}
 
-	private void Drag(float pixels)
+	/// <summary>A new marble shape (Settings): every marble takes it and drops back into its hole.</summary>
+	private void ReshapeBeads()
 	{
-		if (!CanSpin)
+		if (_busy)
 			return;
-		float angle = pixels * SpinPerPixel;
-		_rig.RotateY(angle);
-		ulong now = Time.GetTicksUsec();
-		float dt = Mathf.Max((now - _lastDragUsec) / 1_000_000f, 0.001f);
-		_lastDragUsec = now;
-		// Remember how fast the finger was moving, so a flick keeps the board turning.
-		_spinVelocity = Mathf.Lerp(_spinVelocity, angle / dt, 0.5f);
+		_quiet = true;
+		foreach (var hole in _inHole)
+		{
+			for (int i = 0; i < hole.Count; i++)
+			{
+				var bead = hole[i];
+				bead.Hold();
+				bead.ApplyShape(Shape);
+				bead.Position = DropPoint(bead.Hole, 0.2f + i * 0.12f);
+				bead.Drop(Vector3.Zero);
+			}
+		}
+		GetTree().CreateTimer(1.2).Timeout += () => _quiet = false;
 	}
 
 	private void TryTap(Vector2 screen)
@@ -318,7 +292,7 @@ public partial class Main : Node3D
 	private async Task PlayMove(int pit)
 	{
 		_busy = true;
-		_spinVelocity = 0f;
+		_spin.Stop();
 		_board.HighlightPits(null);
 		_hud.SetUndoVisible(false);
 		_hud.HideHint();
@@ -349,7 +323,10 @@ public partial class Main : Node3D
 		{
 			_roundCounted = true;
 			if (_game.Winner is { } winner)
+			{
 				_wins.Win(first: winner == Side.One);
+				await SetWinnerAlight(winner);
+			}
 		}
 		_busy = false;
 		RefreshUi();
@@ -438,7 +415,7 @@ public partial class Main : Node3D
 				sparkle.Finish();
 				RefreshCounts();
 				// Each landing a little louder, so a big capture rings up like a payout.
-				_sound.PlayImpact(_impacts.Random(_settings.Beads), bead.GlobalPosition, 0.8f, Styles.GainDb(_settings.Beads) + 2f + index * 0.4f);
+				_sound.PlayImpact(_impacts.Random(_settings.Pieces), bead.GlobalPosition, 0.8f, Styles.GainDb(_settings.Pieces) + 2f + index * 0.4f);
 				GetTree().CreateTimer(0.6).Timeout += () => bead.Mesh.MaterialOverlay = null;
 			}));
 		}
@@ -525,7 +502,7 @@ public partial class Main : Node3D
 			return;
 		var surface = other switch
 		{
-			Bead => _settings.Beads,
+			Bead => _settings.Pieces,
 			_ when other == _board.Body => _board.Style,
 			_ => Style.Table,
 		};
@@ -538,31 +515,27 @@ public partial class Main : Node3D
 	{
 		float dt = (float)delta;
 		UpdateComputer(dt);
-		if (!_dragging && _spinVelocity != 0f)
-		{
-			if (!CanSpin || Mathf.Abs(_spinVelocity) < 0.02f)
-				_spinVelocity = 0f;
-			_rig.RotateY(_spinVelocity * dt);
-			_spinVelocity *= Mathf.Exp(-SpinDamping * dt);
-		}
+		_spin.Process(dt);
 	}
 
 	public override void _PhysicsProcess(double delta)
 	{
-		// Now and then, put back any marble that rolled out of its hole or off the board, so what
-		// you see always matches the counts.
+		// Now and then, put back any marble that left its hole or the board, so what you see always
+		// matches the counts. That includes marbles that came to rest outside, on a rim or the flat
+		// top (a bounce out of a full pit): frozen there, they would ride round with the board
+		// outside their bowl. A rolling marble gets some slack; a resting one must be inside.
 		_escapeCheck += (float)delta;
-		if (_escapeCheck < 0.5f || _busy)
+		if (_escapeCheck < 0.3f || _busy)
 			return;
 		_escapeCheck = 0f;
 		foreach (var bead in AllBeads())
 		{
-			if (!bead.Moving)
+			float slack = bead.Moving ? 0.15f : 0.02f;
+			bool outside = DistanceToRim(bead.Hole, bead.Position) > slack || bead.Position.Y < -StoreDepth - 0.2f;
+			if (!outside || bead.Returns >= 3)
 				continue;
-			bool outside = DistanceToRim(bead.Hole, bead.Position) > 0.15f || bead.Position.Y < -StoreDepth - 0.2f;
-			if (!outside)
-				continue;
-			DevLog.Write($"marble escaped from hole {bead.Hole}, putting it back");
+			bead.Returns++;
+			DevLog.Write($"marble outside hole {bead.Hole} (moving={bead.Moving}), putting it back");
 			bead.Hold();
 			bead.Position = DropPoint(bead.Hole, 0.5f);
 			bead.Drop(Vector3.Zero);
@@ -576,7 +549,7 @@ public partial class Main : Node3D
 	/// </summary>
 	private void UpdateComputer(float dt)
 	{
-		if (_busy || !IsComputerTurn)
+		if (_busy || !IsComputerTurn || _clip != null)
 			return;
 		if (_thinking == null)
 		{
@@ -625,6 +598,7 @@ public partial class Main : Node3D
 
 	private async void StartGame()
 	{
+		PutOutFire();
 		_computerGeneration++;
 		_thinking = null;
 		_busy = true;
@@ -634,6 +608,127 @@ public partial class Main : Node3D
 		await MatchBoardToRules();
 		_busy = false;
 		RefreshUi();
+	}
+
+	/// <summary>Starting over against the computer counts as resigning (a loss), unless you watch an ad.</summary>
+	private void OnRestartPressed()
+	{
+		if (_busy)
+			return;
+		if (_game.IsOver || _game.MovesMade == 0)
+		{
+			StartGame();
+			return;
+		}
+		_hud.AskRestart(VsComputer && !_demo, countLoss =>
+		{
+			if (countLoss)
+				_wins.Win(first: Human != Side.One);
+			StartGame();
+		}, then => _ads.ShowRewarded(rewarded: then, closed: () => { }));
+	}
+
+	// ---------------------------------------------------------------- The winner's fire
+
+	/// <summary>
+	/// The winner's store bursts into flame: every marble in it glows with fire, and flames rise
+	/// from marbles spread across the store (a phone manages about a dozen fires at once).
+	/// </summary>
+	private async Task SetWinnerAlight(Side winner)
+	{
+		var marbles = _inHole[Kalah.StoreOf(winner)];
+		int flames = Mathf.Min(9, marbles.Count);
+		int every = Mathf.Max(1, marbles.Count / Mathf.Max(1, flames));
+		for (int i = 0, lit = 0; i < marbles.Count; i++)
+		{
+			var bead = marbles[i];
+			bool withFlames = i % every == 0 && lit < flames;
+			_fires.Add(Flames.SetAlight(_rig, bead.Position, new[] { bead.Mesh }, radius: 0.2f, size: 0.8f, withLight: i == 0, particles: withFlames));
+			if (withFlames)
+			{
+				lit++;
+				await Wait(0.07f);
+			}
+		}
+	}
+
+	private void PutOutFire()
+	{
+		foreach (var fire in _fires)
+			fire.Extinguish();
+		_fires.Clear();
+		foreach (var bead in AllBeads())
+			bead.Mesh.MaterialOverlay = null;
+	}
+
+	// ---------------------------------------------------------------- Tutorial clips
+
+	/// <summary>
+	/// Plays one scripted scene for the tutorial (with --clip=name; Record-Clips.ps1 records it),
+	/// then quits. The HUD is hidden so the clip shows only the board.
+	/// </summary>
+	private async Task PlayClip(string clip)
+	{
+		_settings.Mode = GameMode.PlayerVsPlayer;
+		_settings.Muted = false;
+		await Wait(1.6f);
+		switch (clip)
+		{
+			case "sow":
+				// Four marbles from the third pit: the last lands in your store, so you go again.
+				await PlayMove(2);
+				await Wait(0.8f);
+				await PlayMove(5);
+				break;
+			case "capture":
+			{
+				// A real game up to its first capture, then that move on camera.
+				var computer = new ComputerPlayer(Difficulty.Medium, seed: 3);
+				int capture = -1;
+				for (int guard = 0; guard < 60 && capture < 0 && !_game.IsOver; guard++)
+				{
+					capture = _game.LegalMoves().FirstOrDefault(m => _game.Clone().Sow(m).Captured > 0, -1);
+					if (capture < 0)
+						_game.Sow(computer.ChooseMove(_game));
+				}
+				_busy = true;
+				await MatchBoardToRules();
+				await Wait(1.2f);
+				_busy = false;
+				RefreshUi();
+				if (capture >= 0)
+					await PlayMove(capture);
+				break;
+			}
+			default:
+			{
+				// A real game played most of the way, then its last moves; the winner's store burns.
+				var computer = new ComputerPlayer(Difficulty.Medium, seed: 11);
+				var moves = new List<int>();
+				var trial = new Kalah();
+				while (!trial.IsOver)
+				{
+					int m = computer.ChooseMove(trial);
+					moves.Add(m);
+					trial.Sow(m);
+				}
+				foreach (int m in moves.Take(moves.Count - 2))
+					_game.Sow(m);
+				_busy = true;
+				await MatchBoardToRules();
+				await Wait(1.2f);
+				_busy = false;
+				RefreshUi();
+				foreach (int m in moves.Skip(moves.Count - 2))
+				{
+					await PlayMove(m);
+					await Wait(0.4f);
+				}
+				break;
+			}
+		}
+		await Wait(2.4f);
+		GetTree().Quit();
 	}
 
 	/// <summary>Undo is offered against the computer on your turn (or after the game ends), once you've moved.</summary>
@@ -653,6 +748,7 @@ public partial class Main : Node3D
 	/// <summary>Takes back the computer's replies and then your whole last turn (extra turns included).</summary>
 	private async Task UndoLastTurn()
 	{
+		PutOutFire();
 		_computerGeneration++;
 		_thinking = null;
 		if (_game.IsOver && _roundCounted && _game.Winner is { } winner)
@@ -676,7 +772,7 @@ public partial class Main : Node3D
 		? (side == Human ? "You" : "Computer")
 		: (side == Side.One ? "Gold" : "Blue");
 
-	private static Color ColorOf(Side side) => side == Side.One ? Palette.SideOne : Palette.SideTwo;
+	private static Color ColorOf(Side side) => side == Side.One ? SideOneColour : SideTwoColour;
 
 	private void RefreshCounts()
 	{
@@ -689,6 +785,7 @@ public partial class Main : Node3D
 		_hud.SetScore($"{NameOf(Side.One)}  {_wins.First}   —   {_wins.Second}  {NameOf(Side.Two)}");
 		_hud.SetNewGameVisible(_game.IsOver && !_busy);
 		_hud.SetUndoVisible(CanUndo);
+		_hud.SetRestartVisible(!_game.IsOver);
 
 		if (_game.IsOver)
 		{
@@ -701,7 +798,7 @@ public partial class Main : Node3D
 				{ } w when NameOf(w) == "You" => $"You win, {_game.Store(w)} to {_game.Store(Kalah.Opponent(w))}!",
 				{ } w => $"{NameOf(w)} wins, {_game.Store(w)} to {_game.Store(Kalah.Opponent(w))}",
 			};
-			_hud.SetStatus(text, winner is { } side ? ColorOf(side) : Palette.Text);
+			_hud.SetStatus(text, winner is { } side ? ColorOf(side) : _hud.Theme.Text);
 			_board.HighlightPits(null);
 			if (_demo && _quitAfterDemo)
 				GetTree().CreateTimer(1.5).Timeout += () => GetTree().Quit();
@@ -714,6 +811,35 @@ public partial class Main : Node3D
 		_board.HighlightPits(_busy || IsComputerTurn ? null : _game.LegalMoves());
 	}
 
+	/// <summary>Dev check: once the marbles settle, turn the board steadily and report any marble that leaves its hole.</summary>
+	private async Task SpinTest()
+	{
+		await Wait(3f);
+		DevLog.Write($"spin test: moving={AllBeads().Count(b => b.Moving)}");
+		float worst = 0f;
+		for (int frame = 0; frame < 240; frame++)
+		{
+			_rig.RotateY(0.05f);
+			await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+			foreach (var bead in AllBeads())
+				worst = Mathf.Max(worst, DistanceToRim(bead.Hole, bead.Position));
+		}
+		DevLog.Write($"spin test: worst distance outside a rim while turning {worst:0.00}");
+		await Wait(0.5f);
+		int outside = 0;
+		foreach (var bead in AllBeads())
+		{
+			float d = DistanceToRim(bead.Hole, bead.Position);
+			if (d > 0.05f || bead.Position.Y > 0.3f)
+			{
+				outside++;
+				DevLog.Write($"spin test: marble of hole {bead.Hole} at {bead.Position} (rim {d:0.00}), frozen={bead.Freeze}");
+			}
+		}
+		DevLog.Write($"spin test: {outside} marbles outside their holes");
+		GetTree().Quit();
+	}
+
 	private SignalAwaiter Wait(float seconds) => ToSignal(GetTree().CreateTimer(seconds), SceneTreeTimer.SignalName.Timeout);
 
 	// ---------------------------------------------------------------- Developer flags
@@ -721,7 +847,7 @@ public partial class Main : Node3D
 	/// <summary>
 	/// Developer flags after `--` (or in user://dev_args.txt on a phone): `--log`, `--demo`
 	/// (the computer plays both sides), `--quit-after-demo`, `--games-since-ad=4`,
-	/// `--board=Wood`, `--beads=Glass`, `--spin=30` (degrees). Style flags aren't saved.
+	/// `--board=Wood`, `--beads=Glass`, `--shape=Gem`, `--spin=30` (degrees), `--spin-test`, `--clip=sow`. Style flags aren't saved.
 	/// </summary>
 	private void ReadDeveloperArgs()
 	{
@@ -745,8 +871,17 @@ public partial class Main : Node3D
 				case "--board" when System.Enum.TryParse(value, out Style board):
 					_settings.Board = board;
 					break;
-				case "--beads" when System.Enum.TryParse(value, out Style beads):
-					_settings.Beads = beads;
+				case "--spin-test":
+					_spinTest = true;
+					break;
+				case "--shape" when System.Enum.TryParse(value, out BeadShape shape):
+					_settings.Extra["marble_shape"] = shape.ToString();
+					break;
+				case "--beads" or "--pieces" when System.Enum.TryParse(value, out Style marbles):
+					_settings.Pieces = marbles;
+					break;
+				case "--clip":
+					_clip = value;
 					break;
 				case "--spin":
 					_initialSpin = Mathf.DegToRad(float.Parse(value, System.Globalization.CultureInfo.InvariantCulture));

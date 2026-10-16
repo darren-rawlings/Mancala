@@ -1,14 +1,8 @@
 using System;
 using System.Collections.Generic;
+using Renegade.Core;
 
 namespace Mancala.Core;
-
-public enum Difficulty
-{
-	Easy,
-	Medium,
-	Hard,
-}
 
 /// <summary>
 /// The computer opponent: alpha-beta search on a bare 14-hole array (no history, no allocations

@@ -1,5 +1,6 @@
 using System.Linq;
 using Mancala.Core;
+using Renegade.Core;
 using Xunit;
 
 namespace Mancala.Tests;
