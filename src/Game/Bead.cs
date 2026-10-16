@@ -56,6 +56,9 @@ public partial class Bead : RigidBody3D
 	public MeshInstance3D Mesh { get; } = new();
 
 	private readonly CollisionShape3D _collision = new();
+	/// <summary>Where a resting marble sits on the board (board space), re-applied every physics tick.</summary>
+	private Transform3D _rest;
+	private bool _resting;
 	private bool _falling;
 	private float _fallSpeed;
 	private float _still;
@@ -125,7 +128,9 @@ public partial class Bead : RigidBody3D
 	/// <summary>Takes the marble out of physics so a tween can carry it.</summary>
 	public void Hold()
 	{
+		FreezeMode = FreezeModeEnum.Kinematic;
 		Freeze = true;
+		_resting = false;
 		_falling = false;
 	}
 
@@ -133,6 +138,7 @@ public partial class Bead : RigidBody3D
 	public void Drop(Vector3 velocity)
 	{
 		Freeze = false;
+		_resting = false;
 		Sleeping = false;
 		LinearVelocity = velocity;
 		AngularVelocity = Vector3.Zero;
@@ -143,12 +149,27 @@ public partial class Bead : RigidBody3D
 	public override void _PhysicsProcess(double delta)
 	{
 		if (Freeze)
+		{
+			// A frozen body follows its parent on desktop, but on the phone (Jolt on Android) the
+			// physics server kept each resting marble where it was in the room while the board
+			// turned under it. Pinning it back to its spot on the board every tick makes it ride along.
+			if (_resting)
+				Transform = _rest;
 			return;
+		}
 		if (_falling)
 			_fallSpeed = LinearVelocity.Length();
 		_still = LinearVelocity.Length() < 0.08f && AngularVelocity.Length() < 0.6f ? _still + (float)delta : 0f;
 		if (_still >= RestTime && !_falling)
+		{
+			// Static, not kinematic: a kinematic body is moved by the physics step and reported back a
+			// tick late, so while the board spun, marbles trailed behind their bowls (on the phone).
+			// A static one is placed directly, so it turns exactly with the board.
+			FreezeMode = FreezeModeEnum.Static;
 			Freeze = true;
+			_rest = Transform;
+			_resting = true;
+		}
 	}
 
 	private void OnBodyEntered(Node body)

@@ -61,6 +61,7 @@ public partial class Main : Node3D
 	private bool _busy;
 	private bool _quiet;
 	private float _escapeCheck;
+	private float _lastSpinCheck;
 	private Task<(int Generation, int Move)>? _thinking;
 	private int _computerGeneration;
 	private float _thinkTime;
@@ -528,14 +529,19 @@ public partial class Main : Node3D
 		if (_escapeCheck < 0.3f || _busy)
 			return;
 		_escapeCheck = 0f;
+		// Resting marbles are only checked while the board holds still: mid-spin, positions can lag.
+		bool turning = !Mathf.IsEqualApprox(_rig.Rotation.Y, _lastSpinCheck);
+		_lastSpinCheck = _rig.Rotation.Y;
 		foreach (var bead in AllBeads())
 		{
+			if (!bead.Moving && turning)
+				continue;
 			float slack = bead.Moving ? 0.15f : 0.02f;
 			bool outside = DistanceToRim(bead.Hole, bead.Position) > slack || bead.Position.Y < -StoreDepth - 0.2f;
 			if (!outside || bead.Returns >= 3)
 				continue;
 			bead.Returns++;
-			DevLog.Write($"marble outside hole {bead.Hole} (moving={bead.Moving}), putting it back");
+			DevLog.Write($"marble outside hole {bead.Hole} (moving={bead.Moving}) at {bead.Position}, putting it back");
 			bead.Hold();
 			bead.Position = DropPoint(bead.Hole, 0.5f);
 			bead.Drop(Vector3.Zero);
