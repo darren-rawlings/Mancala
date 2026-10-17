@@ -15,6 +15,7 @@ public sealed class ComputerPlayer
 	private const int Win = 10_000;
 
 	private readonly Random _random;
+	private KalahRules _rules = KalahRules.Standard;
 
 	public Difficulty Difficulty { get; }
 
@@ -42,6 +43,7 @@ public sealed class ComputerPlayer
 		if (Difficulty == Difficulty.Easy && _random.NextDouble() < 0.33)
 			return moves[_random.Next(moves.Count)];
 
+		_rules = game.Rules;
 		int me = (int)game.Turn;
 		var root = game.CopyHoles();
 		int best = int.MinValue;
@@ -65,7 +67,7 @@ public sealed class ComputerPlayer
 		return bestMoves[_random.Next(bestMoves.Count)];
 	}
 
-	private static int Search(int[] holes, int turn, int depth, int alpha, int beta, int me, bool over)
+	private int Search(int[] holes, int turn, int depth, int alpha, int beta, int me, bool over)
 	{
 		if (over)
 			return Math.Sign(Margin(holes, me)) * Win + Margin(holes, me);
@@ -99,7 +101,7 @@ public sealed class ComputerPlayer
 	}
 
 	/// <summary>The same rules as <see cref="Kalah.Sow"/>, in place on a bare array. Returns who moves next.</summary>
-	private static int Sow(int[] holes, int pit, int turn, out bool over, out bool extra)
+	private int Sow(int[] holes, int pit, int turn, out bool over, out bool extra)
 	{
 		int store = turn == 0 ? Kalah.StoreOne : Kalah.StoreTwo;
 		int skip = turn == 0 ? Kalah.StoreTwo : Kalah.StoreOne;
@@ -115,7 +117,7 @@ public sealed class ComputerPlayer
 		}
 		extra = hole == store;
 		bool ownPit = turn == 0 ? hole < Kalah.StoreOne : hole > Kalah.StoreOne && hole < Kalah.StoreTwo;
-		if (!extra && ownPit && holes[hole] == 1 && holes[12 - hole] > 0)
+		if (!extra && ownPit && holes[hole] == 1 && (_rules.EmptyCapture || holes[12 - hole] > 0))
 		{
 			holes[store] += holes[12 - hole] + 1;
 			holes[12 - hole] = 0;
@@ -136,8 +138,13 @@ public sealed class ComputerPlayer
 				holes[p] = 0;
 				holes[7 + p] = 0;
 			}
-			holes[Kalah.StoreOne] += one;
-			holes[Kalah.StoreTwo] += two;
+			if (_rules.Leftovers == Leftovers.Clearer)
+				holes[one == 0 ? Kalah.StoreOne : Kalah.StoreTwo] += one + two;
+			else
+			{
+				holes[Kalah.StoreOne] += one;
+				holes[Kalah.StoreTwo] += two;
+			}
 		}
 		return extra ? turn : 1 - turn;
 	}
@@ -146,7 +153,7 @@ public sealed class ComputerPlayer
 		me == 0 ? holes[Kalah.StoreOne] - holes[Kalah.StoreTwo] : holes[Kalah.StoreTwo] - holes[Kalah.StoreOne];
 
 	/// <summary>Store difference, plus a little for stones still on your side (they'll likely be yours).</summary>
-	private static int Evaluate(int[] holes, int me)
+	private int Evaluate(int[] holes, int me)
 	{
 		int one = 0, two = 0;
 		for (int p = 0; p < Kalah.PitsPerSide; p++)
@@ -154,7 +161,9 @@ public sealed class ComputerPlayer
 			one += holes[p];
 			two += holes[7 + p];
 		}
-		return Margin(holes, me) * 4 + (me == 0 ? one - two : two - one);
+		// If leftovers go to whoever clears their side, marbles on your side are a liability instead.
+		int side = me == 0 ? one - two : two - one;
+		return Margin(holes, me) * 4 + (_rules.Leftovers == Leftovers.Clearer ? -side : side);
 	}
 
 	/// <summary>

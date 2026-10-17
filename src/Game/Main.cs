@@ -41,7 +41,7 @@ public partial class Main : Node3D
 	private static readonly Color SideOneColour = new("ffcc66");
 	private static readonly Color SideTwoColour = new("8fd3ff");
 
-	private readonly Kalah _game = new();
+	private Kalah _game = new();
 	private readonly Scoreboard _wins = new();
 	private readonly List<Bead>[] _inHole = Enumerable.Range(0, Kalah.Holes).Select(_ => new List<Bead>()).ToArray();
 	private readonly ImpactBank<Style> _impacts = new(Styles.Impact);
@@ -85,6 +85,12 @@ public partial class Main : Node3D
 	private bool ShowPitCounts => Flag("pit_numbers", true);
 	private bool ShowStoreCounts => Flag("store_totals", true);
 
+	/// <summary>The house rules picked in Settings (standard Kalah unless changed).</summary>
+	private KalahRules Rules => new(
+		_settings.Extra.TryGetValue("marbles_per_pit", out var s) && int.TryParse(s, out int n) && n is >= 3 and <= 6 ? n : 4,
+		Flag("empty_capture", false),
+		_settings.Extra.TryGetValue("leftovers", out var l) && System.Enum.TryParse(l, out Leftovers left) ? left : Leftovers.Owner);
+
 	private BeadShape Shape =>
 		_settings.Extra.TryGetValue("marble_shape", out var saved) && System.Enum.TryParse(saved, out BeadShape shape) ? shape : BeadShape.Round;
 
@@ -102,6 +108,7 @@ public partial class Main : Node3D
 		if (old.Load("user://settings.cfg") == Error.Ok && !old.HasSectionKey("settings", "pieces") && old.HasSectionKey("settings", "beads") && System.Enum.TryParse(old.GetValue("settings", "beads").AsString(), out Style beads))
 			_settings.Pieces = beads;
 		ReadDeveloperArgs();
+		_game = new Kalah(Rules);
 		AudioServer.SetBusMute(0, _settings.Muted);
 		BuildWorld();
 
@@ -144,6 +151,24 @@ public partial class Main : Node3D
 			_settings.Save();
 			ReshapeBeads();
 		});
+
+		// House rules (common Kalah variants). They start with the next game, or straight away
+		// if no one has moved yet.
+		_hud.AddChoice("Marbles per pit", new[] { "3", "4", "5", "6" }, Rules.StonesPerPit - 3, index =>
+		{
+			_settings.Extra["marbles_per_pit"] = (index + 3).ToString();
+			RulesChanged();
+		});
+		_hud.AddToggle("Empty capture (take a lone last marble)", Rules.EmptyCapture, on =>
+		{
+			_settings.Extra["empty_capture"] = on.ToString();
+			RulesChanged();
+		});
+		_hud.AddChoice("Marbles left at the end go to", new[] { "Their owner", "Who cleared their side" }, (int)Rules.Leftovers, index =>
+		{
+			_settings.Extra["leftovers"] = ((Leftovers)index).ToString();
+			RulesChanged();
+		});
 		_hud.ModeChosen += (mode, difficulty) =>
 		{
 			_settings.Mode = mode;
@@ -167,6 +192,8 @@ public partial class Main : Node3D
 		};
 
 		_spin = new SpinControl(_rig, () => CanSpin);
+		// Freeze the board also turns it back to where it started, once every marble is at rest.
+		_spin.Frozen = () => _settings.FreezeBoard && !_busy && _inHole.All(hole => hole.All(bead => !bead.Moving));
 		_spin.Tapped += TryTap;
 		_board.ShowCounts(ShowPitCounts, ShowStoreCounts);
 		PlaceBeadsForNewGame();
@@ -251,6 +278,15 @@ public partial class Main : Node3D
 	{
 		if (!_hud.MenuOpen)
 			_spin.HandleInput(@event);
+	}
+
+	private void RulesChanged()
+	{
+		_settings.Save();
+		if (!_busy && _game.MovesMade == 0)
+			StartGame();
+		else
+			_hud.SetStatus("New rules start with the next game", _hud.Theme.Text);
 	}
 
 	/// <summary>A new marble shape (Settings): every marble takes it and drops back into its hole.</summary>
@@ -434,15 +470,14 @@ public partial class Main : Node3D
 	}
 
 	/// <summary>Game over: the marbles left on each side slide into their owner's store.</summary>
-	private async Task SweepBeads(IReadOnlyList<(int Hole, int Stones)> sweep)
+	private async Task SweepBeads(IReadOnlyList<(int Hole, int Stones, int Store)> sweep)
 	{
 		if (sweep.Count == 0)
 			return;
 		await Wait(0.3f);
 		int i = 0;
-		foreach (var (hole, _) in sweep)
+		foreach (var (hole, _, store) in sweep)
 		{
-			int store = Kalah.StoreOf(Kalah.OwnerOf(hole));
 			foreach (var bead in _inHole[hole].ToList())
 				Carry(bead, store, i++ * 0.05f);
 			_inHole[hole].Clear();
@@ -609,9 +644,24 @@ public partial class Main : Node3D
 		_thinking = null;
 		_busy = true;
 		_roundCounted = false;
-		_game.Reset();
+		// House rules chosen in Settings take effect from the next game.
+		bool restock = Rules.StonesPerPit != _game.StonesPerPit;
+		_game = new Kalah(Rules);
 		RefreshUi();
-		await MatchBoardToRules();
+		if (restock)
+		{
+			// A different number of marbles a pit: clear the board and drop in a fresh set.
+			foreach (var bead in AllBeads())
+				bead.QueueFree();
+			foreach (var hole in _inHole)
+				hole.Clear();
+			PlaceBeadsForNewGame();
+			await Wait(1.2f);
+		}
+		else
+		{
+			await MatchBoardToRules();
+		}
 		_busy = false;
 		RefreshUi();
 	}

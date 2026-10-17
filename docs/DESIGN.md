@@ -17,6 +17,11 @@ The classic two-row count-and-capture game (the "Kalah" rules most people know):
 - When either player's six pits are all empty, the game ends; each player banks the stones left
   on their own side. **Most stones in the store wins.**
 
+House rules (Settings; the common Kalah variants, from the next game): **3 to 6 marbles a pit**;
+**Empty capture** (a last marble in your own empty pit is captured even with nothing opposite);
+and **leftovers** at the end going to their owner (standard) or to whoever cleared their side.
+The computer plays every variant correctly.
+
 ## Feel
 
 Counter Fire's lesson: real-feeling pieces, honest sounds, one unforgettable effect.

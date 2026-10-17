@@ -145,10 +145,62 @@ public class KalahTests
 		Assert.True(worst < 400, $"Slowest move took {worst} ms.");
 	}
 
-	/// <summary>A position with the given pits (left to right from each player's view), One to move.</summary>
-	private static Kalah Setup(int[] one, int[] two)
+	[Fact]
+	public void StandardCaptureNeedsMarblesOppositeButEmptyCaptureDoesNot()
 	{
-		var game = new Kalah(stonesPerPit: 0);
+		// One's last marble lands in its own empty pit 3; the pit opposite (9) is empty.
+		var standard = Setup(new[] { 0, 0, 1, 0, 0, 0 }, new[] { 1, 1, 0, 1, 1, 1 });
+		Assert.Equal(0, standard.Sow(2).Captured);
+		var variant = Setup(new[] { 0, 0, 1, 0, 0, 0 }, new[] { 1, 1, 0, 1, 1, 1 }, new KalahRules(EmptyCapture: true));
+		var result = variant.Sow(2);
+		Assert.Equal(1, result.Captured);
+		Assert.Equal(1, variant.Store(Side.One));
+		Assert.Equal(0, variant[3]);
+	}
+
+	[Theory]
+	[InlineData(Leftovers.Owner, 0, 5)]
+	[InlineData(Leftovers.Clearer, 5, 0)]
+	public void LeftoversGoToTheirOwnerOrToWhoeverClearedTheirSide(Leftovers rule, int oneGets, int twoGets)
+	{
+		// One sows its last marble into its store: One's side is clear, Two still has 5.
+		var game = Setup(new[] { 0, 0, 0, 0, 0, 1 }, new[] { 2, 3, 0, 0, 0, 0 }, new KalahRules(Leftovers: rule));
+		var result = game.Sow(5);
+		Assert.True(result.GameOver);
+		Assert.Equal(1 + oneGets, game.Store(Side.One));
+		Assert.Equal(twoGets, game.Store(Side.Two));
+		Assert.All(result.FinalSweep, sweep => Assert.Equal(rule == Leftovers.Clearer ? Kalah.StoreOne : Kalah.StoreTwo, sweep.Store));
+	}
+
+	[Theory]
+	[InlineData(3)]
+	[InlineData(6)]
+	public void AGameCanStartWithThreeToSixMarblesAPit(int stones)
+	{
+		var game = new Kalah(new KalahRules(StonesPerPit: stones));
+		Assert.All(Kalah.PitsOf(Side.One).Concat(Kalah.PitsOf(Side.Two)), pit => Assert.Equal(stones, game[pit]));
+	}
+
+	[Theory]
+	[InlineData(false, Leftovers.Owner)]
+	[InlineData(true, Leftovers.Clearer)]
+	public void TheComputerFinishesGamesUnderEveryRuleSet(bool emptyCapture, Leftovers leftovers)
+	{
+		var rules = new KalahRules(5, emptyCapture, leftovers);
+		var game = new Kalah(rules);
+		var one = new ComputerPlayer(Difficulty.Hard, seed: 2);
+		var two = new ComputerPlayer(Difficulty.Medium, seed: 3);
+		int guard = 0;
+		while (!game.IsOver && guard++ < 300)
+			game.Sow((game.Turn == Side.One ? one : two).ChooseMove(game));
+		Assert.True(game.IsOver);
+		Assert.Equal(60, game.Store(Side.One) + game.Store(Side.Two));
+	}
+
+	/// <summary>A position with the given pits (left to right from each player's view), One to move.</summary>
+	private static Kalah Setup(int[] one, int[] two, KalahRules? rules = null)
+	{
+		var game = new Kalah((rules ?? KalahRules.Standard) with { StonesPerPit = 0 });
 		var field = typeof(Kalah).GetField("_holes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
 		var holes = (int[])field.GetValue(game)!;
 		for (int i = 0; i < 6; i++)

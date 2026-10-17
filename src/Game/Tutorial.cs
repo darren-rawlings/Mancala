@@ -21,7 +21,7 @@ public static class Tutorial
 			"If your last marble lands in an empty pit on your side, you capture it, and every marble in the pit opposite. They fly into your store.",
 			"res://tutorial/capture.ogv"),
 		new TutorialPage("The end",
-			"When one side's pits are all empty, the game ends and each player keeps the marbles left on their side. The winner's store catches fire. Settings has the pit numbers, store totals and marble shape.",
+			"When one side's pits are all empty, the game ends and each player keeps the marbles left on their side. The winner's store catches fire. Settings has the pit numbers, store totals, marble shape, and house rules: 3 to 6 marbles a pit, empty capture, and who gets the leftovers.",
 			"res://tutorial/end.ogv"),
 	};
 }

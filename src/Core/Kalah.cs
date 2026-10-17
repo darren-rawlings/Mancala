@@ -14,6 +14,25 @@ public enum Side
 /// What one sowing did, step by step, so the game can animate exactly what the rules decided.
 /// <see cref="Path"/> lists the hole each stone landed in, in order.
 /// </summary>
+/// <summary>Where the marbles left in the pits go when a side runs out.</summary>
+public enum Leftovers
+{
+	/// <summary>Standard: each player keeps the marbles on their own side.</summary>
+	Owner,
+
+	/// <summary>Variant: the player who cleared their side takes everything left.</summary>
+	Clearer,
+}
+
+/// <summary>
+/// The house rules. Standard Kalah is 4 marbles a pit, a capture only with marbles opposite, and
+/// leftovers kept by their owner; the variants are the common ones (see Kalah on Wikipedia).
+/// </summary>
+public sealed record KalahRules(int StonesPerPit = 4, bool EmptyCapture = false, Leftovers Leftovers = Leftovers.Owner)
+{
+	public static readonly KalahRules Standard = new();
+}
+
 public sealed record SowResult(
 	Side Mover,
 	int From,
@@ -23,7 +42,7 @@ public sealed record SowResult(
 	int CaptureFrom,
 	int Captured,
 	bool GameOver,
-	IReadOnlyList<(int Hole, int Stones)> FinalSweep);
+	IReadOnlyList<(int Hole, int Stones, int Store)> FinalSweep);
 
 /// <summary>
 /// Kalah, the mancala most people know: two rows of six pits plus a store each, 4 stones per pit.
@@ -42,17 +61,20 @@ public sealed class Kalah
 
 	public Side Turn { get; private set; }
 	public bool IsOver { get; private set; }
-	public int StonesPerPit { get; }
+	public KalahRules Rules { get; }
+	public int StonesPerPit => Rules.StonesPerPit;
 
-	public Kalah(int stonesPerPit = 4)
+	public Kalah(int stonesPerPit = 4) : this(KalahRules.Standard with { StonesPerPit = stonesPerPit }) { }
+
+	public Kalah(KalahRules rules)
 	{
-		StonesPerPit = stonesPerPit;
+		Rules = rules;
 		Reset();
 	}
 
 	private Kalah(Kalah other)
 	{
-		StonesPerPit = other.StonesPerPit;
+		Rules = other.Rules;
 		Array.Copy(other._holes, _holes, Holes);
 		Turn = other.Turn;
 		IsOver = other.IsOver;
@@ -131,8 +153,10 @@ public sealed class Kalah
 
 		bool extraTurn = hole == StoreOf(mover);
 		int captureFrom = -1, captured = 0;
-		if (!extraTurn && !IsStore(hole) && OwnerOf(hole) == mover && _holes[hole] == 1 && _holes[Opposite(hole)] > 0)
+		if (!extraTurn && !IsStore(hole) && OwnerOf(hole) == mover && _holes[hole] == 1 && (Rules.EmptyCapture || _holes[Opposite(hole)] > 0))
 		{
+			// The last marble and everything opposite go to the store (with Empty capture, even
+			// when nothing is opposite: the lone marble is taken).
 			captureFrom = Opposite(hole);
 			captured = _holes[captureFrom] + 1;
 			_holes[StoreOf(mover)] += captured;
@@ -140,16 +164,19 @@ public sealed class Kalah
 			_holes[hole] = 0;
 		}
 
-		var sweep = new List<(int, int)>();
-		if (PitsOf(Side.One).All(p => _holes[p] == 0) || PitsOf(Side.Two).All(p => _holes[p] == 0))
+		var sweep = new List<(int, int, int)>();
+		bool oneEmpty = PitsOf(Side.One).All(p => _holes[p] == 0), twoEmpty = PitsOf(Side.Two).All(p => _holes[p] == 0);
+		if (oneEmpty || twoEmpty)
 		{
 			IsOver = true;
+			var clearer = oneEmpty ? Side.One : Side.Two;
 			for (int p = 0; p < Holes; p++)
 			{
 				if (IsStore(p) || _holes[p] == 0)
 					continue;
-				sweep.Add((p, _holes[p]));
-				_holes[StoreOf(OwnerOf(p))] += _holes[p];
+				int store = StoreOf(Rules.Leftovers == Leftovers.Clearer ? clearer : OwnerOf(p));
+				sweep.Add((p, _holes[p], store));
+				_holes[store] += _holes[p];
 				_holes[p] = 0;
 			}
 		}
