@@ -30,7 +30,9 @@ public partial class Main : Node3D
 	/// Google's test ad units until the real ones exist in AdMob (see the release playbook in
 	/// addons/renegade_core/docs). The game is for everyone, children included.
 	/// </summary>
-	private static readonly AdMobConfig AdUnits = AdMobConfig.Test;
+	private static readonly AdMobConfig AdUnits = new(
+		InterstitialUnitId: "ca-app-pub-3310172999423635/9183052495",
+		RewardedUnitId: "ca-app-pub-3310172999423635/5928449171");
 
 	/// <summary>Side One is the near row; against the computer, that's you.</summary>
 	private const Side Human = Side.One;
